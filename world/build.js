@@ -13,12 +13,13 @@ import { surfaceAt, buildDecor } from './grounds.js';
 import { buildMountains } from './mountains.js';
 import { buildCampus } from './campus.js';
 import { defineStage, buildMarkers, markerPulse } from './markers.js';
-import { venueUniforms } from './stations/venue.js';
 import { startModels } from './models.js';
+import { buildBalloons } from './balloons.js';
 import { makePlan } from './plan.js';
 
 let activePetals = null;
 let footstepFx = null;
+let balloons = null;
 
 // Labyrinth (the mascot dog): built with the engine's own dog rig
 // (@engine/world/avatar.js) but driven by our own follow/click logic instead of
@@ -65,6 +66,12 @@ export function build({ grid, layer, materials, scene }) {
     else console.warn(`No build for station "${station.id}" in world/stations/index.js`);
   }
   buildDecor({ ...out, layer, materials });
+  // GDG balloons on the Venue's roof corners: one small moving batch.
+  const venue = PLAN.find(p => p.id === 'venue');
+  if (venue) {
+    balloons = buildBalloons({ layer, materials, station: venue, B: out.B });
+    out.planes.push(...balloons.meshes);
+  }
   // A stage, a gold outline and a beacon beam for every station.
   buildMarkers(out.B);
 
@@ -161,12 +168,10 @@ export function setup({ stage, player, sound, world }) {
     update(dt) {
       if (modelsIn > 0 && (modelsIn -= dt) <= 0) startModels(stage);
       updateDog(dt);
+      balloons?.update(dt, player.pos.x, player.pos.z);
       if (activePetals) activePetals.update(dt);
       if (footstepFx) footstepFx.update(dt);
       pulse(dt);
-      if (venueUniforms) {
-        venueUniforms.uNight.value = stage ? stage.night : (world?.isNight?.() ? 1.0 : 0.0);
-      }
 
       // A last guard in case flight or a zip slips past the edge.
       const p = player.pos;
