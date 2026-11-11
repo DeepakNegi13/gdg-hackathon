@@ -67,7 +67,7 @@ for (const img of document.querySelectorAll('img[data-icon]')) img.src = icon(im
 const arrivedBy = arrival();
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-let bootFailed = false, bootRenderer = null, bootPhase = 'renderer';
+let bootFailed = false, bootRenderer = null, bootPageCharacterRenderer = null, bootPhase = 'renderer';
 function plain(error = null) {
   hideLoading();
   document.body.classList.add('plain');
@@ -110,6 +110,11 @@ else boot().catch(err => {
   bootFailed = true;
   console.error('3D startup failed:', bootPhase, err);
   if (bootRenderer) { bootRenderer.dispose(); bootRenderer.forceContextLoss(); }
+  if (bootPageCharacterRenderer) {
+    bootPageCharacterRenderer.domElement.remove();
+    bootPageCharacterRenderer.dispose();
+    bootPageCharacterRenderer.forceContextLoss();
+  }
   $('#world').replaceChildren();
   delete window.__home;
   plain(err);
@@ -121,6 +126,22 @@ async function boot() {
   await nextFrame();
   const stage = createStage($('#world'), quality);
   bootRenderer = stage.renderer;
+  const pageCharacterRenderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', alpha: true });
+  bootPageCharacterRenderer = pageCharacterRenderer;
+  pageCharacterRenderer.outputColorSpace = stage.renderer.outputColorSpace;
+  pageCharacterRenderer.toneMapping = stage.renderer.toneMapping;
+  pageCharacterRenderer.toneMappingExposure = stage.renderer.toneMappingExposure;
+  pageCharacterRenderer.setClearColor(0x000000, 0);
+  pageCharacterRenderer.shadowMap.enabled = false;
+  pageCharacterRenderer.setPixelRatio(stage.renderer.getPixelRatio());
+  pageCharacterRenderer.setSize(innerWidth, innerHeight);
+  pageCharacterRenderer.domElement.className = 'page-character-layer';
+  pageCharacterRenderer.domElement.style.display = 'none';
+  $('#panel').append(pageCharacterRenderer.domElement);
+  const resizePageCharacterRenderer = () => {
+    pageCharacterRenderer.setPixelRatio(stage.renderer.getPixelRatio());
+    pageCharacterRenderer.setSize(innerWidth, innerHeight);
+  };
   bootPhase = 'world';
   progress(0.3);
   await nextFrame();
@@ -306,6 +327,28 @@ async function boot() {
   popOut.className = 'pop-out'; popOut.target = '_blank'; popOut.rel = 'noopener'; popOut.textContent = '↗'; popOut.hidden = true;
   panel.querySelector('header .close').before(popOut);
   let openStation = null;
+  const pageCharacterStations = new Set(['tracks', 'schedule', 'prizes', 'sponsors', 'team', 'faq', 'venue', 'register']);
+  const pageCharacterOffset = new THREE.Vector3();
+  const pageCharacterTarget = new THREE.Vector3();
+  const playerPosition = new THREE.Vector3();
+  const pageCharacterObjects = [];
+  avatar.root.traverse(object => pageCharacterObjects.push(object));
+  let pageCharacterProgress = 0;
+  let panelRect = { left: 0, top: 0, width: 0, height: 0, bottom: 0 };
+  function updatePanelRect() {
+    panelRect = panel.getBoundingClientRect();
+  }
+  function layoutPageComposition() {
+    if (!pageCharacterStations.has(panel.dataset.station)) return;
+    if (innerWidth <= 900) { panel.style.left = ''; updatePanelRect(); return; }
+    const width = panel.getBoundingClientRect().width;
+    const depth = 3.6;
+    const halfHeight = Math.tan(stage.camera.fov * Math.PI / 360);
+    const characterWidth = 0.72 * innerHeight / (2 * halfHeight * depth);
+    const overlap = width * 0.16;
+    panel.style.left = `${Math.round(innerWidth / 2 - (width + overlap - characterWidth) / 2)}px`;
+    updatePanelRect();
+  }
   function openPage(id) {
     if (id === 'portal') { openPortal(); return; }
     if (!publicStations.some(s => s.id === id)) return;
@@ -337,9 +380,12 @@ async function boot() {
     workbench.mount(body);
     mailboxForm.mount(body);
     placePortalControls(panel);
-    if (!panel.open) panel.showModal();
     // On a phone the radar and switches step aside while a page is open.
     document.body.classList.add('reading');
+    document.body.classList.toggle('page-reading', pageCharacterStations.has(id));
+    if (!pageCharacterStations.has(id)) pageCharacterProgress = 0;
+    if (!panel.open) panel.showModal();
+    layoutPageComposition();
     input.clear();
     player.cancel();
     marker.hide();
@@ -351,6 +397,9 @@ async function boot() {
   function openPortal() {
     if (isTravelling() || portal?.busy) return;
     togglePhone(false); toggleWeatherMenu(false); minimap.toggleBig(false); rig.skipIntro();
+    document.body.classList.remove('page-reading');
+    pageCharacterProgress = 0;
+    panel.style.left = '';
     openStation = 'portal'; panel.dataset.station = 'portal'; panel.dataset.kind = '';
     $('#panelTitle').textContent = t('传送门', 'Portal');
     panel.querySelector('header .icon').style.backgroundImage = `url(${icon('portal').url})`;
@@ -390,6 +439,9 @@ async function boot() {
     panel.querySelector('.body iframe')?.remove();
     openStation = null; markSlot(null);
     document.body.classList.remove('reading');
+    document.body.classList.remove('page-reading');
+    panel.style.left = '';
+    pageCharacterProgress = 0;
   });
 
   // ---------- The prompt in the corner ----------
@@ -810,6 +862,7 @@ async function boot() {
   // The same baked field lights furniture, printed artwork, the player and pets.
   // Bind it before warmup so night/day switches never compile another shader.
   world.lighting.apply(stage.scene);
+  stage.scene.traverse(object => { if (object.isLight) object.layers.enable(1); });
   // The web is normally hidden, so include it in warmup explicitly; otherwise
   // its shader would compile on the first zip.
   player.web.position.set(0, -30, 0); player.web.visible = true;
@@ -824,6 +877,15 @@ async function boot() {
   stage.scene.traverse(o => {
     if (o.isMesh || o.isPoints || o.isLine) { warmObjects.push([o, o.frustumCulled]); o.frustumCulled = false; }
   });
+  for (const object of pageCharacterObjects) object.layers.set(1);
+  stage.camera.layers.set(1);
+  try {
+    await pageCharacterRenderer.compileAsync(stage.scene, stage.camera);
+    pageCharacterRenderer.render(stage.scene, stage.camera);
+  } finally {
+    stage.camera.layers.mask = cameraMask;
+    for (const object of pageCharacterObjects) object.layers.set(0);
+  }
   stage.camera.layers.enable(1);
   if (aerial) { await stage.renderer.compileAsync(aerial.scene, aerial.camera); aerial.render(); }
   // A full cloud deck turns the sun, and its shadow lookups, off. Compile
@@ -891,8 +953,9 @@ async function boot() {
   function stats() {
     const info = stage.renderer.info, frames = [...frameTimes].filter(Boolean);
     const frameMs = frames.length ? frames.reduce((a, b) => a + b, 0) / frames.length : 0;
-    return { calls: info.render.calls, triangles: info.render.triangles, textures: info.memory.textures, geometries: info.memory.geometries,
-      programs: info.programs?.length ?? 0, lights: world.lights.length, pixelRatio: +stage.renderer.getPixelRatio().toFixed(2), frameMs: +frameMs.toFixed(1), budget: BUDGET };
+    const preview = pageCharacterProgress > 0 ? pageCharacterRenderer.info : null;
+    return { calls: info.render.calls + (preview?.render.calls ?? 0), triangles: info.render.triangles + (preview?.render.triangles ?? 0), textures: info.memory.textures, geometries: info.memory.geometries,
+      programs: (info.programs?.length ?? 0) + (preview?.programs?.length ?? 0), lights: world.lights.length, pixelRatio: +stage.renderer.getPixelRatio().toFixed(2), frameMs: +frameMs.toFixed(1), budget: BUDGET };
   }
   const debugEl = new URLSearchParams(location.search).has('debug') ? document.body.appendChild(Object.assign(document.createElement('pre'), { id: 'debugStats' })) : null;
   let debugClock = 0;
@@ -923,9 +986,32 @@ async function boot() {
 
     const move = paused || rig.introActive || portal?.busy ? { x: 0, z: 0, run: false, up: false, down: false } : input.read();
     const fp = rig.firstPerson && !rig.introActive;
+    const showPageCharacter = panel.open && pageCharacterStations.has(panel.dataset.station);
+    pageCharacterProgress = THREE.MathUtils.clamp(pageCharacterProgress + (showPageCharacter ? dt : -dt) / 0.3, 0, 1);
+    const renderPageCharacter = pageCharacterProgress > 0;
     player.update(dt, move, rig.yaw, fp);
     portal?.update(dt, player);
     rig.update(dt, player);
+    if (showPageCharacter || pageCharacterProgress > 0) {
+      stage.camera.updateMatrixWorld(true);
+      avatar.root.visible = true;
+      const mobile = innerWidth <= 900;
+      const depth = mobile ? 9 : 3.6;
+      const halfHeight = Math.tan(stage.camera.fov * Math.PI / 360);
+      const characterWidth = 0.72 * innerHeight / (2 * halfHeight * depth);
+      const overlap = panelRect.width * 0.16;
+      const centerX = mobile ? innerWidth / 2 : panelRect.left + overlap - characterWidth / 2;
+      const footY = mobile ? panelRect.top - 8 : panelRect.bottom - 24;
+      const ndcX = centerX / innerWidth * 2 - 1;
+      const ndcY = 1 - footY / innerHeight * 2;
+      pageCharacterOffset.set(ndcX * depth * halfHeight * stage.camera.aspect, ndcY * depth * halfHeight, -depth);
+      pageCharacterTarget.copy(pageCharacterOffset).applyMatrix4(stage.camera.matrixWorld);
+      playerPosition.set(player.pos.x, player.y, player.pos.z);
+      avatar.root.position.lerpVectors(playerPosition, pageCharacterTarget, pageCharacterProgress);
+      avatar.root.rotation.y = Math.atan2(stage.camera.position.x - avatar.root.position.x, stage.camera.position.z - avatar.root.position.z);
+      avatar.update(0, { speed: 0, run: false, fly: -1, lookYaw: 0, lookPitch: 0 });
+      avatar.root.updateMatrixWorld(true);
+    }
     stage.setClearance(rig.introActive ? stage.camera.position.distanceTo(player.pos) : 0);
     for (const pet of pets) pet.update(dt, stage.camera, player);
     aerial?.update(elapsed, stage.camera, screen);
@@ -944,8 +1030,8 @@ async function boot() {
     stage.update(elapsed);
     // Looking up through their own eyes from the pool's floor, as in first
     // person, their body is out of the way.
-    avatar.root.visible = !fp && rig.gazeAmount < 0.7;
-    avatar.blob.visible = !fp && !player.swimming;
+    if (!renderPageCharacter) avatar.root.visible = !fp && rig.gazeAmount < 0.7;
+    avatar.blob.visible = !renderPageCharacter && !fp && !player.swimming;
     crosshair.hidden = !fp;
     viewButton.setAttribute('aria-pressed', String(fp));
     syncFlyButton();
@@ -970,7 +1056,24 @@ async function boot() {
       if (fp) hover(innerWidth / 2, innerHeight / 2);
       else if (mouse.x >= 0) hover(mouse.x, mouse.y);
     }
-    stage.render();
+    const cameraMask = stage.camera.layers.mask;
+    if (renderPageCharacter) {
+      for (const object of pageCharacterObjects) object.layers.set(1);
+    }
+    try {
+      stage.render();
+      if (renderPageCharacter) {
+        pageCharacterRenderer.domElement.style.display = 'block';
+        stage.camera.layers.set(1);
+        pageCharacterRenderer.toneMappingExposure = stage.renderer.toneMappingExposure;
+        pageCharacterRenderer.render(stage.scene, stage.camera);
+      } else if (pageCharacterRenderer.domElement.style.display !== 'none') pageCharacterRenderer.domElement.style.display = 'none';
+    } finally {
+      if (renderPageCharacter) {
+        stage.camera.layers.mask = cameraMask;
+        for (const object of pageCharacterObjects) object.layers.set(0);
+      }
+    }
     frameTimes[frameIndex = (frameIndex + 1) % frameTimes.length] = elapsed * 1000;
     if (debugEl && (debugClock += elapsed) > 0.5) {
       debugClock = 0;
@@ -988,6 +1091,7 @@ async function boot() {
         if (avg > 1 / 25 || (avg > 1 / 50 && jitter > 0.004)) {
           governor.level++;
           stage.setPixelRatio(Math.max(quality.mobile ? 0.85 : 1, stage.renderer.getPixelRatio() * 0.8));
+          resizePageCharacterRenderer();
         }
         governor.t = governor.frames = governor.sum = governor.sq = 0;
       }
@@ -996,7 +1100,7 @@ async function boot() {
   }
   requestAnimationFrame(loop);
 
-  addEventListener('resize', () => stage.resize());
+  addEventListener('resize', () => { stage.resize(); resizePageCharacterRenderer(); if (panel.open) layoutPageComposition(); });
   // Handy when poking at it from the console.
   window.__home = {
     sound,
